@@ -1,3 +1,4 @@
+import sys
 import os
 import warnings
 import tempfile
@@ -5,6 +6,8 @@ import tempfile
 import pandas as pd
 import numpy as np
 from scipy.stats import pearsonr
+
+from sklearn.metrics import r2_score
 
 import keras
 from keras import backend as K
@@ -21,13 +24,11 @@ def get_distance_matrix(raw, n_pred=None):
 
     VMR = raw.std() / raw.mean()
     VMR[np.isinf(VMR)] = 0
-    
     if n_pred is None:
         potential_pred = raw.columns[VMR > 0]
     else:
         print("Using {} predictors".format(n_pred))
         potential_pred = VMR.sort_values(ascending=False).index[:n_pred]
-    
     covariance_matrix = pd.DataFrame(np.abs(np.corrcoef(raw.T.loc[potential_pred])),
                                      index=potential_pred,
                                      columns=potential_pred).fillna(0)
@@ -126,7 +127,6 @@ class MultiNet:
     def build(self, inputdims):
         if self.NN_parameters['architecture'] is None:
             self.loadDefaultArchitecture()
-
         print(self.NN_parameters['architecture'])
 
         inputs = [ Input(shape=(inputdim,)) for inputdim in inputdims ]
@@ -163,7 +163,7 @@ class MultiNet:
                     
         model.compile(optimizer=keras.optimizers.Adam(lr=self.NN_parameters['learning_rate']),
                       loss=loss)
-
+        print(model.summary())
         return model
 
     def fit(self,
@@ -176,9 +176,9 @@ class MultiNet:
             minVMR=0.5,
             mode='random',
     ):
-        
+
         inspect_data(raw)
-        
+
         if self.seed is not None:
             np.random.seed(self.seed)
 
@@ -200,7 +200,7 @@ class MultiNet:
                 genes_to_impute = np.concatenate((genes_to_impute, fill_genes))
 
         covariance_matrix = get_distance_matrix(raw, n_pred=n_pred)
-        
+
         self.setTargets(raw.reindex(columns=genes_to_impute), mode=mode)
         self.setPredictors(covariance_matrix, ntop=ntop)
 
@@ -209,7 +209,7 @@ class MultiNet:
 
         np.random.seed(self.seed)
         tf.set_random_seed(self.seed)
-        
+
         config = tf.ConfigProto(intra_op_parallelism_threads=self.ncores,
                                 inter_op_parallelism_threads=self.ncores,
                                 use_per_session_threads=True,
@@ -225,10 +225,11 @@ class MultiNet:
 
         X_train = [norm_data.loc[train_cells, inputgenes].values for inputgenes in self.predictors]
         Y_train = [norm_data.loc[train_cells, targetgenes].values for targetgenes in self.targets]
-        
+
         X_test = [norm_data.loc[test_cells, inputgenes].values for inputgenes in self.predictors]
         Y_test = [norm_data.loc[test_cells, targetgenes].values for targetgenes in self.targets]
 
+        #sys.exit()
         print("Fitting with {} cells".format(norm_data.shape[0]))
         result = model.fit(X_train, Y_train,
                            validation_data=(X_test,Y_test),
@@ -246,6 +247,10 @@ class MultiNet:
         # Save some metrics on test data
         Y_test_raw = np.hstack(Y_test).flatten()
         Y_test_imputed = np.hstack(model.predict(X_test)).flatten()
+        
+        print(Y_test_raw)
+        print()
+        print(Y_test_imputed)
 
         # Keep only positive values (since negative values could be dropouts)
         Y_test_imputed = Y_test_imputed[Y_test_raw>0]
@@ -253,7 +258,8 @@ class MultiNet:
 
         self.test_metrics = {
             'correlation': pearsonr(Y_test_raw,Y_test_imputed)[0],
-            'MSE': np.sum((Y_test_raw-Y_test_imputed)**2)/len(Y_test_raw)
+            'MSE': np.sum((Y_test_raw-Y_test_imputed)**2)/len(Y_test_raw),
+            'R2': r2_score(Y_test_raw, Y_test_imputed)
         }        
         
         return self
@@ -322,7 +328,6 @@ class MultiNet:
             genes_to_impute = np.concatenate([genes_to_impute, fill_genes])
 
         print("{} genes selected for imputation".format(len(genes_to_impute)))
-
         return genes_to_impute
 
     def setTargets(self,data, mode='random'):
@@ -346,7 +351,6 @@ class MultiNet:
                           )
             sorted_idx = np.argsort(-subMatrix.values, axis=1)
             predictors = subMatrix.columns[sorted_idx[:,:ntop].flatten()]
-
             self.predictors.append(predictors.unique())
 
             print("Net {}: {} predictors, {} targets"
